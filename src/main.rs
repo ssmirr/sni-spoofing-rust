@@ -78,6 +78,16 @@ fn main() {
         }
     };
 
+    #[cfg(target_os = "windows")]
+    let backend = match sniffer::windows::WinDivertBackend::open(&upstream_sockaddrs) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("failed to open WinDivert: {}", e);
+            error!("hint: run as Administrator");
+            std::process::exit(1);
+        }
+    };
+
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<proto::SnifferCommand>();
 
     let stop = Arc::new(AtomicBool::new(false));

@@ -99,6 +99,8 @@ impl BpfBackend {
 }
 
 impl RawBackend for BpfBackend {
+    fn frame_kind(&self) -> crate::packet::FrameKind { crate::packet::FrameKind::Ethernet }
+
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
         loop {
             if self.read_pos < self.read_len {

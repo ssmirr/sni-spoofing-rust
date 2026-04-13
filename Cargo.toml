@@ -1,6 +1,6 @@
 [package]
 name = "sni-spoof-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -11,7 +11,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 socket2 = "0.5"
-libc = "0.2"
-nix = { version = "0.29", features = ["net", "ioctl"] }
 tokio-util = "0.7"
 rand = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+nix = { version = "0.29", features = ["net", "ioctl"] }
+
+[target.'cfg(windows)'.dependencies]
+windivert = { version = "0.7.0-beta", features = ["vendored"] }

@@ -2,6 +2,8 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -12,12 +14,14 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-use crate::packet::{IpVersion, eth, ipv4, ipv6, tcp};
+use crate::packet::{FrameKind, IpVersion, detect_ip_version, ipv4, ipv6, tcp};
 use crate::proto::{ConnId, SnifferCommand, SnifferResult};
 
 pub trait RawBackend: Send + 'static {
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::SnifferError>;
     fn send_frame(&mut self, frame: &[u8]) -> Result<(), crate::error::SnifferError>;
+    fn frame_kind(&self) -> FrameKind;
+    fn skip_checksum_on_send(&self) -> bool { false }
 }
 
 struct ConnState {
@@ -28,16 +32,21 @@ struct ConnState {
     result_tx: tokio::sync::mpsc::Sender<SnifferResult>,
 }
 
-fn build_fake_frame(template: &[u8], isn: u32, fake_payload: &[u8], ip_ver: IpVersion) -> Vec<u8> {
-    let eth_len = eth::ETH_HEADER_LEN;
-
+fn build_fake_frame(
+    template: &[u8],
+    isn: u32,
+    fake_payload: &[u8],
+    ip_ver: IpVersion,
+    link_len: usize,
+    skip_checksum: bool,
+) -> Vec<u8> {
     let (ip_hdr_len, tcp_off) = match ip_ver {
         IpVersion::V4 => {
-            let ihl = ipv4::header_len(&template[eth_len..]);
-            (ihl, eth_len + ihl)
+            let ihl = ipv4::header_len(&template[link_len..]);
+            (ihl, link_len + ihl)
         }
         IpVersion::V6 => {
-            (ipv6::IPV6_HEADER_LEN, eth_len + ipv6::IPV6_HEADER_LEN)
+            (ipv6::IPV6_HEADER_LEN, link_len + ipv6::IPV6_HEADER_LEN)
         }
     };
 
@@ -50,14 +59,16 @@ fn build_fake_frame(template: &[u8], isn: u32, fake_payload: &[u8], ip_ver: IpVe
 
     match ip_ver {
         IpVersion::V4 => {
-            let ip_hdr = &mut out[eth_len..];
+            let ip_hdr = &mut out[link_len..];
             let new_total = (ip_hdr_len + tcp_hdr_len + fake_payload.len()) as u16;
             ipv4::set_total_length(ip_hdr, new_total);
             ipv4::increment_ident(ip_hdr);
-            ipv4::recompute_checksum(ip_hdr);
+            if !skip_checksum {
+                ipv4::recompute_checksum(ip_hdr);
+            }
         }
         IpVersion::V6 => {
-            let ip_hdr = &mut out[eth_len..];
+            let ip_hdr = &mut out[link_len..];
             let new_payload = (tcp_hdr_len + fake_payload.len()) as u16;
             ipv6::set_payload_length(ip_hdr, new_payload);
         }
@@ -68,14 +79,16 @@ fn build_fake_frame(template: &[u8], isn: u32, fake_payload: &[u8], ip_ver: IpVe
     let fake_seq = isn.wrapping_add(1).wrapping_sub(fake_payload.len() as u32);
     tcp::set_seq_num(tcp_hdr, fake_seq);
 
-    match ip_ver {
-        IpVersion::V4 => {
-            let (ip_part, tcp_part) = out.split_at_mut(tcp_off);
-            tcp::recompute_checksum_v4(&ip_part[eth_len..], tcp_part);
-        }
-        IpVersion::V6 => {
-            let (ip_part, tcp_part) = out.split_at_mut(tcp_off);
-            tcp::recompute_checksum_v6(&ip_part[eth_len..], tcp_part);
+    if !skip_checksum {
+        match ip_ver {
+            IpVersion::V4 => {
+                let (ip_part, tcp_part) = out.split_at_mut(tcp_off);
+                tcp::recompute_checksum_v4(&ip_part[link_len..], tcp_part);
+            }
+            IpVersion::V6 => {
+                let (ip_part, tcp_part) = out.split_at_mut(tcp_off);
+                tcp::recompute_checksum_v6(&ip_part[link_len..], tcp_part);
+            }
         }
     }
 
@@ -92,13 +105,14 @@ fn parse_frame(
     frame: &[u8],
     local_ips: &[IpAddr],
     upstream_addrs: &HashMap<(IpAddr, u16), ()>,
+    frame_kind: FrameKind,
 ) -> Option<ParsedPacket> {
-    let ip_ver = eth::ethertype(frame)?;
-    let eth_len = eth::ETH_HEADER_LEN;
+    let ip_ver = detect_ip_version(frame, frame_kind)?;
+    let link_len = frame_kind.link_header_len();
 
     let (src_ip, dst_ip, proto, tcp_off): (IpAddr, IpAddr, u8, usize) = match ip_ver {
         IpVersion::V4 => {
-            let ip_hdr = &frame[eth_len..];
+            let ip_hdr = &frame[link_len..];
             if ip_hdr.len() < ipv4::IPV4_MIN_HEADER_LEN {
                 return None;
             }
@@ -107,11 +121,11 @@ fn parse_frame(
                 IpAddr::V4(ipv4::src_addr(ip_hdr)),
                 IpAddr::V4(ipv4::dst_addr(ip_hdr)),
                 ipv4::protocol(ip_hdr),
-                eth_len + ihl,
+                link_len + ihl,
             )
         }
         IpVersion::V6 => {
-            let ip_hdr = &frame[eth_len..];
+            let ip_hdr = &frame[link_len..];
             if ip_hdr.len() < ipv6::IPV6_HEADER_LEN {
                 return None;
             }
@@ -119,7 +133,7 @@ fn parse_frame(
                 IpAddr::V6(ipv6::src_addr(ip_hdr)),
                 IpAddr::V6(ipv6::dst_addr(ip_hdr)),
                 ipv6::next_header(ip_hdr),
-                eth_len + ipv6::IPV6_HEADER_LEN,
+                link_len + ipv6::IPV6_HEADER_LEN,
             )
         }
     };
@@ -137,7 +151,6 @@ fn parse_frame(
     let dport = tcp::dst_port(tcp_hdr);
 
     let src_is_local = local_ips.contains(&src_ip);
-    let dst_is_local = local_ips.contains(&dst_ip);
     let src_is_upstream = upstream_addrs.contains_key(&(src_ip, sport));
     let dst_is_upstream = upstream_addrs.contains_key(&(dst_ip, dport));
 
@@ -152,7 +165,7 @@ fn parse_frame(
             is_outbound: true,
             ip_version: ip_ver,
         })
-    } else if src_is_upstream && dst_is_local {
+    } else if src_is_upstream && local_ips.contains(&dst_ip) {
         Some(ParsedPacket {
             outbound_id: ConnId {
                 src_ip: dst_ip,
@@ -177,6 +190,9 @@ pub fn run_sniffer(
 ) {
     let upstream_set: HashMap<(IpAddr, u16), ()> =
         upstream_addrs.iter().map(|a| (*a, ())).collect();
+    let frame_kind = backend.frame_kind();
+    let skip_checksum = backend.skip_checksum_on_send();
+    let link_len = frame_kind.link_header_len();
 
     let mut connections: HashMap<ConnId, ConnState> = HashMap::new();
     let mut buf = vec![0u8; 65536];
@@ -238,7 +254,7 @@ pub fn run_sniffer(
         };
 
         let frame = &buf[..n];
-        let parsed = match parse_frame(frame, &local_ips, &upstream_set) {
+        let parsed = match parse_frame(frame, &local_ips, &upstream_set, frame_kind) {
             Some(p) => p,
             None => continue,
         };
@@ -249,10 +265,8 @@ pub fn run_sniffer(
         };
 
         let tcp_off = match parsed.ip_version {
-            IpVersion::V4 => {
-                eth::ETH_HEADER_LEN + ipv4::header_len(&frame[eth::ETH_HEADER_LEN..])
-            }
-            IpVersion::V6 => eth::ETH_HEADER_LEN + ipv6::IPV6_HEADER_LEN,
+            IpVersion::V4 => link_len + ipv4::header_len(&frame[link_len..]),
+            IpVersion::V6 => link_len + ipv6::IPV6_HEADER_LEN,
         };
         let tcp_hdr = &frame[tcp_off..];
         let fl = tcp::flags(tcp_hdr);
@@ -280,8 +294,9 @@ pub fn run_sniffer(
                     conn.fake_injected = true;
                     debug!(port = parsed.outbound_id.src_port, "3rd ACK captured, injecting fake");
 
-                    let fake_frame =
-                        build_fake_frame(frame, isn, &conn.fake_payload, parsed.ip_version);
+                    let fake_frame = build_fake_frame(
+                        frame, isn, &conn.fake_payload, parsed.ip_version, link_len, skip_checksum,
+                    );
                     thread::sleep(Duration::from_millis(1));
 
                     if let Err(e) = backend.send_frame(&fake_frame) {

@@ -25,6 +25,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: sni-spoof-rs-macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: sni-spoof-rs-windows-amd64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -46,11 +49,19 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/sni-spoof-rs dist/${{ matrix.name }}
           chmod +x dist/${{ matrix.name }}
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/sni-spoof-rs.exe dist/${{ matrix.name }}
 
       - uses: actions/upload-artifact@v4
         with:

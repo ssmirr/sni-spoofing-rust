@@ -68,6 +68,8 @@ impl AfPacketBackend {
 }
 
 impl RawBackend for AfPacketBackend {
+    fn frame_kind(&self) -> crate::packet::FrameKind { crate::packet::FrameKind::Ethernet }
+
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
         let n = unsafe {
             libc::recvfrom(

@@ -8,6 +8,7 @@ A TCP forwarder that injects a fake TLS ClientHello with an intentionally wrong 
 
 - **Linux** -- AF_PACKET raw sockets. Requires root or `CAP_NET_RAW`.
 - **macOS** -- BPF device. Requires root.
+- **Windows** -- WinDivert driver. Requires Administrator.
 
 ## Build
 
@@ -15,12 +16,16 @@ A TCP forwarder that injects a fake TLS ClientHello with an intentionally wrong 
 cargo build --release
 ```
 
-Pre-built binaries for Linux (amd64/arm64) and macOS (amd64/arm64) are available on the [releases](https://github.com/therealaleph/sni-spoof-rs/releases) page.
+Pre-built binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64) are available on the [releases](https://github.com/therealaleph/sni-spoofing-rust/releases) page.
 
 ## Usage
 
 ```
+# Linux/macOS
 sudo ./sni-spoof-rs config.json
+
+# Windows (run as Administrator)
+sni-spoof-rs.exe config.json
 ```
 
 ### config.json

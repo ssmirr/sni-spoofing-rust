@@ -43,6 +43,7 @@ jobs:
 
       - name: Install MinGW toolchain
         if: matrix.target == 'x86_64-pc-windows-gnu'
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -61,9 +62,10 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-gnu'
         shell: pwsh
         run: |
+          $gcc = "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin\gcc.exe" -replace '\\','/'
           New-Item -ItemType Directory -Force -Path $env:USERPROFILE/.cargo | Out-Null
           Add-Content -Path $env:USERPROFILE/.cargo/config.toml -Value '[target.x86_64-pc-windows-gnu]'
-          Add-Content -Path $env:USERPROFILE/.cargo/config.toml -Value 'linker = "C:/msys64/mingw64/bin/gcc.exe"'
+          Add-Content -Path $env:USERPROFILE/.cargo/config.toml -Value "linker = '$gcc'"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
